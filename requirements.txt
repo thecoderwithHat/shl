@@ -1,0 +1,9 @@
+fastapi>=0.136,<1
+uvicorn>=0.46,<1
+numpy>=1.26,<2
+scikit-learn>=1.7,<2
+pytest>=8.0,<9
+httpx>=0.28,<1
+langchain-core>=0.3,<1
+langchain-openai>=0.3,<1
+openai>=1.0,<2
