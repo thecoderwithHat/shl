@@ -42,3 +42,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Generated FAISS index artifacts
+faiss_index/
