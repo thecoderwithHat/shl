@@ -14,6 +14,9 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from pydantic import BaseModel, Field
 from sklearn.feature_extraction.text import HashingVectorizer
+import tempfile
+import uuid
+import shutil
 
 from .llm import build_openrouter_chat_model, maybe_extract_json
 
@@ -38,6 +41,44 @@ MAX_CONVERSATION_TURNS = 8
 
 def _max_recommendations() -> int:
     return max(1, _env_int("MAX_RECOMMENDATIONS", 10))
+
+
+class _HashingEmbeddings(Embeddings):
+    def __init__(self, n_features: int = 4096):
+        self.vectorizer = HashingVectorizer(
+            n_features=n_features,
+            alternate_sign=False,
+            norm="l2",
+            ngram_range=(1, 2),
+        )
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        matrix = self.vectorizer.transform(texts)
+        return matrix.toarray().tolist()
+
+    def embed_query(self, text: str) -> list[float]:
+        matrix = self.vectorizer.transform([text])
+        return matrix.toarray()[0].tolist()
+
+
+def _atomic_save_vector_store(vector_store, index_path: str) -> None:
+    temp_dir = Path(index_path).with_name(Path(index_path).name + ".tmp-" + uuid.uuid4().hex)
+    try:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        vector_store.save_local(str(temp_dir))
+        index_dir = Path(index_path)
+        if index_dir.exists():
+            shutil.rmtree(index_dir)
+        temp_dir.rename(index_dir)
+        LOGGER.info("Saved FAISS index to %s (atomic)", index_path)
+    except Exception:
+        LOGGER.exception("Failed to atomically save FAISS index to %s", index_path)
+        try:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
+        except Exception:
+            pass
 
 KEY_TO_TEST_TYPE = {
     "Knowledge & Skills": "K",
@@ -324,27 +365,12 @@ def _resolve_known_product_mentions(text: str, products: Sequence[CatalogProduct
 
 
 class SemanticCatalogIndex:
-    class _HashingEmbeddings(Embeddings):
-        def __init__(self, n_features: int = 4096):
-            self.vectorizer = HashingVectorizer(
-                n_features=n_features,
-                alternate_sign=False,
-                norm="l2",
-                ngram_range=(1, 2),
-            )
-
-        def embed_documents(self, texts: list[str]) -> list[list[float]]:
-            matrix = self.vectorizer.transform(texts)
-            return matrix.toarray().tolist()
-
-        def embed_query(self, text: str) -> list[float]:
-            matrix = self.vectorizer.transform([text])
-            return matrix.toarray()[0].tolist()
+    pass
 
     def __init__(self, products: Sequence[CatalogProduct]):
         self.products = list(products)
         self.products_by_id = {product.entity_id: product for product in self.products}
-        self.embeddings = self._HashingEmbeddings()
+        self.embeddings = _HashingEmbeddings()
         documents: list[Document] = []
         for product in self.products:
             documents.append(
@@ -373,8 +399,7 @@ class SemanticCatalogIndex:
                     LOGGER.exception("Failed to load FAISS index from %s; rebuilding", index_path)
                     self.vector_store = FAISS.from_documents(documents, embedding=self.embeddings)
                     try:
-                        self.vector_store.save_local(index_path)
-                        LOGGER.info("Saved FAISS index to %s", index_path)
+                        _atomic_save_vector_store(self.vector_store, index_path)
                     except Exception:
                         LOGGER.warning("Failed to save FAISS index to %s", index_path)
             else:
@@ -383,8 +408,7 @@ class SemanticCatalogIndex:
                 try:
                     # create parent dir if needed
                     index_dir.mkdir(parents=True, exist_ok=True)
-                    self.vector_store.save_local(index_path)
-                    LOGGER.info("Built and saved FAISS index to %s", index_path)
+                    _atomic_save_vector_store(self.vector_store, index_path)
                 except Exception:
                     LOGGER.warning("Could not save FAISS index to %s; continuing with in-memory index", index_path)
         except Exception:
