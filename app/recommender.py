@@ -8,16 +8,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-import numpy as np
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from pydantic import BaseModel, Field
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import HashingVectorizer
 
 from .llm import build_openrouter_chat_model, maybe_extract_json
-
-try:  # Optional FAISS support. The service falls back to dense cosine search.
-    import faiss  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    faiss = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -303,38 +301,59 @@ def _resolve_known_product_mentions(text: str, products: Sequence[CatalogProduct
 
 
 class SemanticCatalogIndex:
+    class _HashingEmbeddings(Embeddings):
+        def __init__(self, n_features: int = 4096):
+            self.vectorizer = HashingVectorizer(
+                n_features=n_features,
+                alternate_sign=False,
+                norm="l2",
+                ngram_range=(1, 2),
+            )
+
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            matrix = self.vectorizer.transform(texts)
+            return matrix.toarray().tolist()
+
+        def embed_query(self, text: str) -> list[float]:
+            matrix = self.vectorizer.transform([text])
+            return matrix.toarray()[0].tolist()
+
     def __init__(self, products: Sequence[CatalogProduct]):
         self.products = list(products)
-        self.vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words="english", max_features=8000)
-        self.matrix = self.vectorizer.fit_transform(product.searchable_text for product in self.products)
-        self.dense_matrix = self.matrix.astype(np.float32).toarray()
-        self._normalize_dense(self.dense_matrix)
-        self.faiss_index = None
-        if faiss is not None:
-            self.faiss_index = faiss.IndexFlatIP(self.dense_matrix.shape[1])
-            self.faiss_index.add(self.dense_matrix)
-
-    @staticmethod
-    def _normalize_dense(matrix: np.ndarray) -> None:
-        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        matrix /= norms
+        self.products_by_id = {product.entity_id: product for product in self.products}
+        self.embeddings = self._HashingEmbeddings()
+        documents: list[Document] = []
+        for product in self.products:
+            documents.append(
+                Document(
+                    page_content=product.searchable_text,
+                    metadata={
+                        "entity_id": product.entity_id,
+                        "name": product.name,
+                        "url": product.url,
+                    },
+                )
+            )
+        self.vector_store = FAISS.from_documents(documents, embedding=self.embeddings)
+        self.retriever = self.vector_store.as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": 10},
+        )
+        self.retriever_chain = RunnablePassthrough() | RunnableLambda(self.retriever.invoke)
 
     def search(self, query: str, top_k: int = 5) -> list[tuple[CatalogProduct, float]]:
-        query_vector = self.vectorizer.transform([query]).astype(np.float32).toarray()
-        self._normalize_dense(query_vector)
-        if self.faiss_index is not None:
-            scores, indices = self.faiss_index.search(query_vector, top_k)
-            output: list[tuple[CatalogProduct, float]] = []
-            for score, index in zip(scores[0], indices[0]):
-                if index < 0:
-                    continue
-                output.append((self.products[index], float(score)))
-            return output
-
-        scores = self.dense_matrix @ query_vector[0]
-        ranked_indices = np.argsort(scores)[::-1][:top_k]
-        return [(self.products[index], float(scores[index])) for index in ranked_indices]
+        documents = self.retriever_chain.invoke(query)
+        output: list[tuple[CatalogProduct, float]] = []
+        for rank, document in enumerate(documents[:top_k]):
+            entity_id = document.metadata.get("entity_id")
+            if entity_id is None:
+                continue
+            product = self.products_by_id.get(str(entity_id))
+            if product is None:
+                continue
+            score = 1.0 / float(rank + 1)
+            output.append((product, score))
+        return output
 
 
 def _detect_language(text: str) -> str | None:
