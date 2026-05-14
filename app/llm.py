@@ -15,11 +15,13 @@ def build_openrouter_chat_model():
         return None
 
     model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct")
+    timeout = float(os.getenv("OPENROUTER_TIMEOUT", "25"))
     return ChatOpenAI(
         model=model,
         api_key=api_key,
         base_url="https://openrouter.ai/api/v1",
         temperature=0,
+        timeout=timeout,
     )
 
 

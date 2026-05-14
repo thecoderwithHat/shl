@@ -22,6 +22,23 @@ ROOT = Path(__file__).resolve().parents[1]
 CATALOG_PATH = ROOT / "shl_product_catalog.json"
 LOGGER = logging.getLogger("shl.recommender")
 
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if not raw_value:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+MAX_CONVERSATION_TURNS = 8
+
+
+def _max_recommendations() -> int:
+    return max(1, _env_int("MAX_RECOMMENDATIONS", 10))
+
 KEY_TO_TEST_TYPE = {
     "Knowledge & Skills": "K",
     "Personality & Behavior": "P",
@@ -160,13 +177,19 @@ class Recommendation(BaseModel):
     rationale: str | None = None
 
 
+class PublicRecommendation(BaseModel):
+    name: str
+    url: str
+    test_type: str
+
+
 class ChatRequest(BaseModel):
     messages: list[ConversationMessage]
 
 
 class ChatResponse(BaseModel):
     reply: str
-    recommendations: list[Recommendation] | None
+    recommendations: list[PublicRecommendation] = Field(default_factory=list)
     end_of_conversation: bool
 
 
@@ -341,11 +364,13 @@ class SemanticCatalogIndex:
             if index_dir.exists():
                 # Attempt to load an existing persisted FAISS index
                 try:
-                    self.vector_store = FAISS.load_local(index_path, embeddings=self.embeddings)
+                    allow_deser = os.getenv("FAISS_ALLOW_DANGEROUS_DESERIALIZATION", "1").lower() in ("1", "true", "yes")
+                    LOGGER.info("FAISS load: allow_dangerous_deserialization=%s", allow_deser)
+                    self.vector_store = FAISS.load_local(index_path, embeddings=self.embeddings, allow_dangerous_deserialization=allow_deser)
                     LOGGER.info("Loaded FAISS index from %s", index_path)
                 except Exception:
-                    # If load fails, fall back to building a new index
-                    LOGGER.warning("Failed to load FAISS index from %s; rebuilding", index_path)
+                    # If load fails, log the full exception (stacktrace) then fall back to building a new index
+                    LOGGER.exception("Failed to load FAISS index from %s; rebuilding", index_path)
                     self.vector_store = FAISS.from_documents(documents, embedding=self.embeddings)
                     try:
                         self.vector_store.save_local(index_path)
@@ -557,13 +582,26 @@ def _product_recommendation(product: CatalogProduct, rationale: str | None = Non
     )
 
 
+def _public_recommendations(products: Sequence[CatalogProduct]) -> list[PublicRecommendation]:
+    return [
+        PublicRecommendation(name=product.name, url=product.url, test_type=product.test_type_display)
+        for product in list(products)[:_max_recommendations()]
+    ]
+
+
+def _is_timeout_error(error: Exception) -> bool:
+    error_name = error.__class__.__name__.lower()
+    error_text = str(error).lower()
+    return "timeout" in error_name or "timeout" in error_text or "timed out" in error_text
+
+
 def _answer_compare(products: Sequence[CatalogProduct], compared: Sequence[str]) -> ChatResponse:
     left = _match_product(compared[0], products) if compared else None
     right = _match_product(compared[1], products) if len(compared) > 1 else None
     if not left or not right:
         return ChatResponse(
             reply="I could not confidently resolve both products from the catalog. Please name the two exact assessment names.",
-            recommendations=None,
+            recommendations=[],
             end_of_conversation=False,
         )
 
@@ -574,7 +612,7 @@ def _answer_compare(products: Sequence[CatalogProduct], compared: Sequence[str])
         f"{right.name} is a {right_kind} with test types {right.test_type_display or 'unknown'}. "
         f"Both are distinct catalog items, and the key difference is in what they measure and how they are used."
     )
-    return ChatResponse(reply=reply, recommendations=None, end_of_conversation=False)
+    return ChatResponse(reply=reply, recommendations=[], end_of_conversation=False)
 
 
 class ConversationRecommender:
@@ -583,50 +621,52 @@ class ConversationRecommender:
         self.index = SemanticCatalogIndex(self.products)
 
     def respond(self, messages: Sequence[ConversationMessage]) -> ChatResponse:
+        total_turns = len(messages)
         if not messages:
             return ChatResponse(
                 reply="Please share the hiring context and assessment goals so I can recommend a shortlist.",
-                recommendations=None,
+                recommendations=[],
                 end_of_conversation=False,
             )
 
-        intent = self._extract_intent(messages)
+        intent = self._extract_intent(messages, total_turns)
+        final_turn = total_turns >= MAX_CONVERSATION_TURNS
 
         if intent.prompt_injection:
             return ChatResponse(
                 reply="I can help with the assessment catalog, but I can’t follow instructions to ignore the system or reveal hidden prompts.",
-                recommendations=None,
+                recommendations=[],
                 end_of_conversation=False,
             )
 
         if intent.legal:
             return ChatResponse(
                 reply="I can help select assessments, but I can’t interpret legal or compliance obligations or say whether a test satisfies a regulation.",
-                recommendations=None,
+                recommendations=[],
                 end_of_conversation=False,
             )
 
         if intent.off_topic and not intent.role_family and not intent.compare_products:
             return ChatResponse(
                 reply="I can only help with SHL assessment selection, comparison, and shortlist updates.",
-                recommendations=None,
+                recommendations=[],
                 end_of_conversation=False,
             )
 
         if intent.compare_products:
             return _answer_compare(self.products, intent.compare_products)
 
-        if intent.role_family == "leadership" and intent.goal is None and intent.user_turns < 7:
-            return ChatResponse(reply=self._clarification_question(intent), recommendations=None, end_of_conversation=False)
+        if intent.role_family == "leadership" and intent.goal is None and not final_turn:
+            return ChatResponse(reply=self._clarification_question(intent), recommendations=[], end_of_conversation=False)
 
-        if intent.role_family == "contact_center" and not intent.language and intent.user_turns < 7:
-            return ChatResponse(reply=self._clarification_question(intent), recommendations=None, end_of_conversation=False)
+        if intent.role_family == "contact_center" and not intent.language and not final_turn:
+            return ChatResponse(reply=self._clarification_question(intent), recommendations=[], end_of_conversation=False)
 
-        if intent.role_family == "contact_center" and intent.language and not intent.accent and intent.user_turns < 7:
-            return ChatResponse(reply=self._clarification_question(intent), recommendations=None, end_of_conversation=False)
+        if intent.role_family == "contact_center" and intent.language and not intent.accent and not final_turn:
+            return ChatResponse(reply=self._clarification_question(intent), recommendations=[], end_of_conversation=False)
 
-        if intent.role_family == "technical" and intent.user_turns == 1 and not intent.affirming and not intent.goal:
-            return ChatResponse(reply=self._clarification_question(intent), recommendations=None, end_of_conversation=False)
+        if intent.role_family == "technical" and total_turns == 1 and not intent.affirming and not intent.goal:
+            return ChatResponse(reply=self._clarification_question(intent), recommendations=[], end_of_conversation=False)
 
         current_shortlist = self._build_shortlist(intent)
 
@@ -640,30 +680,30 @@ class ConversationRecommender:
                 if current_shortlist:
                     return ChatResponse(
                         reply=reply,
-                        recommendations=[_product_recommendation(product, self._rationale_for(product, intent)) for product in current_shortlist],
-                        end_of_conversation=intent.user_turns >= 7,
+                        recommendations=_public_recommendations(current_shortlist),
+                        end_of_conversation=final_turn,
                     )
-                return ChatResponse(reply=reply, recommendations=None, end_of_conversation=False)
+                return ChatResponse(reply=reply, recommendations=[], end_of_conversation=False)
             current_shortlist = replacement
 
-        if not current_shortlist and intent.user_turns < 7:
-            return ChatResponse(reply=self._clarification_question(intent), recommendations=None, end_of_conversation=False)
+        if not current_shortlist and not final_turn:
+            return ChatResponse(reply=self._clarification_question(intent), recommendations=[], end_of_conversation=False)
 
         if not current_shortlist:
             return ChatResponse(
                 reply="I’m committing to the best available shortlist based on the information so far, though some requirements remain under-specified.",
-                recommendations=None,
+                recommendations=[],
                 end_of_conversation=True,
             )
 
         reply = self._build_reply(intent, current_shortlist)
         return ChatResponse(
             reply=reply,
-            recommendations=[_product_recommendation(product, self._rationale_for(product, intent)) for product in current_shortlist],
-            end_of_conversation=self._is_finalized(intent),
+            recommendations=_public_recommendations(current_shortlist),
+            end_of_conversation=final_turn or self._is_finalized(intent),
         )
 
-    def _extract_intent(self, messages: Sequence[ConversationMessage]) -> Intent:
+    def _extract_intent(self, messages: Sequence[ConversationMessage], total_turns: int) -> Intent:
         user_messages = [message.content for message in messages if message.role.lower() == "user"]
         combined = normalize_whitespace(" ".join(user_messages))
         latest = normalize_whitespace(user_messages[-1]) if user_messages else ""
@@ -705,12 +745,15 @@ class ConversationRecommender:
                                 ROLE_KEYWORDS["technical"] | ROLE_KEYWORDS["productivity"] | ROLE_KEYWORDS["healthcare"] | ROLE_KEYWORDS["sales"] | ROLE_KEYWORDS["safety"] | ROLE_KEYWORDS["graduate"] | ROLE_KEYWORDS["contact_center"] | ROLE_KEYWORDS["leadership"] | ROLE_KEYWORDS["finance"],
                             ),
                             requested_dimensions=_requested_dimensions(combined),
-                            user_turns=len(user_messages),
+                            user_turns=total_turns,
                             raw_text=combined,
                         )
                     LOGGER.warning("LLM_USED=false reason=invalid_json_payload")
                 except Exception as error:
-                    LOGGER.warning("LLM_USED=false reason=llm_error error=%s", error)
+                    if _is_timeout_error(error):
+                        LOGGER.warning("LLM_USED=false reason=timeout")
+                    else:
+                        LOGGER.warning("LLM_USED=false reason=llm_error error=%s", error)
             else:
                 LOGGER.warning("LLM_USED=false reason=client_unavailable")
         else:
@@ -733,13 +776,13 @@ class ConversationRecommender:
                 ROLE_KEYWORDS["technical"] | ROLE_KEYWORDS["productivity"] | ROLE_KEYWORDS["healthcare"] | ROLE_KEYWORDS["sales"] | ROLE_KEYWORDS["safety"] | ROLE_KEYWORDS["graduate"] | ROLE_KEYWORDS["contact_center"] | ROLE_KEYWORDS["leadership"] | ROLE_KEYWORDS["finance"],
             ),
             requested_dimensions=_requested_dimensions(combined),
-            user_turns=len(user_messages),
+            user_turns=total_turns,
             raw_text=combined,
         )
 
     @staticmethod
     def _is_finalized(intent: Intent) -> bool:
-        return intent.user_turns >= 7 or _contains_any(intent.raw_text, FINALIZATION_TERMS)
+        return intent.user_turns >= MAX_CONVERSATION_TURNS or _contains_any(intent.raw_text, FINALIZATION_TERMS)
 
     def _clarification_question(self, intent: Intent) -> str:
         text = intent.raw_text
@@ -952,7 +995,7 @@ class ConversationRecommender:
         return "Selected from the catalog based on the stated role and assessment goals."
 
     def _build_reply(self, intent: Intent, shortlist: Sequence[CatalogProduct]) -> str:
-        if intent.user_turns >= 7 and not intent.affirming:
+        if intent.user_turns >= MAX_CONVERSATION_TURNS and not intent.affirming:
             return "I’m committing to the best available shortlist based on the information so far, with some uncertainty remaining."
         if intent.affirming:
             return "Confirmed. Here is the current shortlist."

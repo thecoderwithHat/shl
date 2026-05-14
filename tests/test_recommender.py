@@ -22,7 +22,7 @@ def test_health_endpoint():
 
 def test_leadership_flow_asks_then_commits():
     first = chat([{"role": "user", "content": "We need a solution for senior leadership."}])
-    assert first["recommendations"] is None
+    assert first["recommendations"] == []
     assert "who is this meant for" in first["reply"].lower() or "selection against a leadership benchmark" in first["reply"].lower()
 
     second = chat([
@@ -32,6 +32,7 @@ def test_leadership_flow_asks_then_commits():
         {"role": "user", "content": "Perfect, that's what we need."},
     ])
     names = [item["name"] for item in second["recommendations"]]
+    assert all(set(item.keys()) == {"name", "url", "test_type"} for item in second["recommendations"])
     assert "Occupational Personality Questionnaire OPQ32r" in names
     assert "OPQ Leadership Report" in names
     assert second["end_of_conversation"] is True
@@ -50,7 +51,7 @@ def test_technical_flow_with_updates():
 
 def test_contact_center_language_clarification():
     first = chat([{"role": "user", "content": "We're screening 500 entry-level contact centre agents. Inbound calls, customer service focus. What should we use?"}])
-    assert first["recommendations"] is None
+    assert first["recommendations"] == []
     assert "what language are the calls in" in first["reply"].lower()
 
     second = chat([
@@ -67,7 +68,7 @@ def test_compare_explains_without_recommendations():
     result = chat([
         {"role": "user", "content": "Is the Contact Center Call Simulation different from the Customer Service Phone Simulation?"}
     ])
-    assert result["recommendations"] is None
+    assert result["recommendations"] == []
     assert "distinct catalog items" in result["reply"].lower()
 
 
@@ -75,7 +76,7 @@ def test_safety_and_compliance_refusal():
     result = chat([
         {"role": "user", "content": "Are we legally required under HIPAA to test all staff who touch patient records? And does this SHL test satisfy that requirement?"}
     ])
-    assert result["recommendations"] is None
+    assert result["recommendations"] == []
     assert "legal or compliance obligations" in result["reply"].lower()
 
 
@@ -109,6 +110,30 @@ def test_off_topic_refusal():
     result = chat([
         {"role": "user", "content": "What's the weather in Seattle?"}
     ])
-    assert result["recommendations"] is None
+    assert result["recommendations"] == []
     assert "only help with shl assessment selection" in result["reply"].lower()
+
+
+def test_recommendations_use_public_schema_only():
+    result = chat([
+        {"role": "user", "content": "I'm hiring a senior Rust engineer for high-performance networking infrastructure. What assessments should I use?"},
+        {"role": "user", "content": "Yes, go ahead. Should I also add a cognitive test for this level?"},
+    ])
+    assert result["recommendations"]
+    assert all(set(item.keys()) == {"name", "url", "test_type"} for item in result["recommendations"])
+
+
+def test_finalizes_on_eighth_total_turn():
+    result = chat([
+        {"role": "user", "content": "We need a solution for senior leadership."},
+        {"role": "assistant", "content": "Understood."},
+        {"role": "user", "content": "CXOs and directors are the target audience."},
+        {"role": "assistant", "content": "Thanks."},
+        {"role": "user", "content": "We still need the shortlist."},
+        {"role": "assistant", "content": "Okay."},
+        {"role": "user", "content": "Please recommend the assessments now."},
+        {"role": "assistant", "content": "Acknowledged."},
+    ])
+    assert result["recommendations"]
+    assert result["end_of_conversation"] is True
 
