@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from functools import lru_cache
@@ -21,6 +22,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG_PATH = ROOT / "shl_product_catalog.json"
+LOGGER = logging.getLogger("shl.recommender")
 
 KEY_TO_TEST_TYPE = {
     "Knowledge & Skills": "K",
@@ -102,6 +104,31 @@ ROLE_KEYWORDS = {
     "productivity": {"excel", "word", "admin assistant", "admin assistants", "office productivity"},
     "healthcare": {"hipaa", "patient records", "healthcare", "medical", "admin staff"},
     "finance": {"financial analyst", "financial analysts", "finance"},
+}
+
+ALLOWED_ROLE_FAMILIES = set(ROLE_KEYWORDS.keys())
+
+ROLE_FAMILY_ALIASES = {
+    "customer_service": "contact_center",
+    "customer service": "contact_center",
+    "contactcentre": "contact_center",
+    "contact-center": "contact_center",
+    "contact center": "contact_center",
+    "leadership_selection": "leadership",
+    "technical_hiring": "technical",
+    "office": "productivity",
+    "office_productivity": "productivity",
+}
+
+GOAL_ALIASES = {
+    "hiring": "selection",
+    "recruitment": "selection",
+    "selection": "selection",
+    "screening": "screening",
+    "screen": "screening",
+    "development": "development",
+    "reskilling": "development",
+    "reskilling audit": "development",
 }
 
 TECHNOLOGY_NAME_MAP = {
@@ -430,6 +457,31 @@ def _extract_replacement_hint(text: str) -> str | None:
     return None
 
 
+def _normalize_role_family(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = _normalize_for_match(value).replace("_", " ")
+    mapped = ROLE_FAMILY_ALIASES.get(normalized, normalized)
+    mapped = mapped.replace(" ", "_")
+    if mapped in ALLOWED_ROLE_FAMILIES:
+        return mapped
+    return None
+
+
+def _normalize_goal(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = _normalize_for_match(value)
+    return GOAL_ALIASES.get(normalized)
+
+
+def _accent_signal_present(text: str) -> bool:
+    lowered = text.lower()
+    return bool(
+        re.search(r"\b(us|usa|uk|british|australian|indian)\b", lowered)
+    )
+
+
 def _match_product(name: str, products: Sequence[CatalogProduct]) -> CatalogProduct | None:
     normalized = _normalize_for_match(name)
     for product in products:
@@ -569,6 +621,7 @@ class ConversationRecommender:
             llm = build_openrouter_chat_model()
             if llm is not None:
                 try:
+                    LOGGER.info("LLM_ATTEMPTED=true model=%s", os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct"))
                     prompt = (
                         "Extract a compact JSON object from the conversation. "
                         "Return keys: role_family, seniority, language, accent, goal. "
@@ -578,12 +631,18 @@ class ConversationRecommender:
                     response = llm.invoke(prompt)
                     payload = maybe_extract_json(getattr(response, "content", str(response)))
                     if payload:
+                        llm_role_family = _normalize_role_family(payload.get("role_family"))
+                        llm_goal = _normalize_goal(payload.get("goal"))
+                        detected_accent = _detect_accent(combined)
+                        llm_accent = payload.get("accent") if isinstance(payload.get("accent"), str) else None
+                        accent_value = llm_accent if _accent_signal_present(combined) else detected_accent
+                        LOGGER.info("LLM_USED=true")
                         return Intent(
-                            role_family=payload.get("role_family") or _detect_role_family(combined),
+                            role_family=llm_role_family or _detect_role_family(combined),
                             seniority=payload.get("seniority") or _detect_seniority(combined),
                             language=payload.get("language") or _detect_language(combined),
-                            accent=payload.get("accent") or _detect_accent(combined),
-                            goal=payload.get("goal") or _detect_goal(combined),
+                            accent=accent_value,
+                            goal=llm_goal or _detect_goal(combined),
                             compare_products=_extract_compare_targets(latest),
                             remove_targets=_extract_removal_targets(latest),
                             replacement_hint=_extract_replacement_hint(latest),
@@ -598,8 +657,13 @@ class ConversationRecommender:
                             user_turns=len(user_messages),
                             raw_text=combined,
                         )
-                except Exception:
-                    pass
+                    LOGGER.warning("LLM_USED=false reason=invalid_json_payload")
+                except Exception as error:
+                    LOGGER.warning("LLM_USED=false reason=llm_error error=%s", error)
+            else:
+                LOGGER.warning("LLM_USED=false reason=client_unavailable")
+        else:
+            LOGGER.info("LLM_ATTEMPTED=false reason=ENABLE_LLM_not_1")
 
         return Intent(
             role_family=_detect_role_family(combined),
