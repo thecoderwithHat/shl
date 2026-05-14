@@ -334,7 +334,39 @@ class SemanticCatalogIndex:
                     },
                 )
             )
-        self.vector_store = FAISS.from_documents(documents, embedding=self.embeddings)
+        # Support disk-backed FAISS index. Configure via FAISS_INDEX_PATH env var.
+        index_path = os.getenv("FAISS_INDEX_PATH", str(ROOT / "faiss_index"))
+        index_dir = Path(index_path)
+        try:
+            if index_dir.exists():
+                # Attempt to load an existing persisted FAISS index
+                try:
+                    self.vector_store = FAISS.load_local(index_path, embeddings=self.embeddings)
+                    LOGGER.info("Loaded FAISS index from %s", index_path)
+                except Exception:
+                    # If load fails, fall back to building a new index
+                    LOGGER.warning("Failed to load FAISS index from %s; rebuilding", index_path)
+                    self.vector_store = FAISS.from_documents(documents, embedding=self.embeddings)
+                    try:
+                        self.vector_store.save_local(index_path)
+                        LOGGER.info("Saved FAISS index to %s", index_path)
+                    except Exception:
+                        LOGGER.warning("Failed to save FAISS index to %s", index_path)
+            else:
+                # Build the index and persist it for future runs
+                self.vector_store = FAISS.from_documents(documents, embedding=self.embeddings)
+                try:
+                    # create parent dir if needed
+                    index_dir.mkdir(parents=True, exist_ok=True)
+                    self.vector_store.save_local(index_path)
+                    LOGGER.info("Built and saved FAISS index to %s", index_path)
+                except Exception:
+                    LOGGER.warning("Could not save FAISS index to %s; continuing with in-memory index", index_path)
+        except Exception:
+            # Last-resort: fall back to in-memory index
+            LOGGER.exception("Unexpected error while initializing FAISS index; using in-memory index")
+            self.vector_store = FAISS.from_documents(documents, embedding=self.embeddings)
+
         self.retriever = self.vector_store.as_retriever(
             search_type="similarity",
             search_kwargs={"k": 10},
