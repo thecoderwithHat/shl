@@ -28,6 +28,12 @@ python -m pip install -e .[llm]
 - `MAX_RECOMMENDATIONS`: maximum number of recommendations returned in API responses (default `10`).
 - `OPENROUTER_TIMEOUT`: per-call timeout (seconds) for the optional OpenRouter LLM path (default `25`).
 
+Notes on FAISS safety and persistence
+- `FAISS_ALLOW_DANGEROUS_DESERIALIZATION`: opt-in flag to allow langchain to unpickle a persisted FAISS index. Set to `1` only if you trust the index files created locally. When unset or `0`, the service will rebuild the index from the supplied catalog. Use caution when enabling this in shared environments.
+
+Local development conveniences
+- A `.example.env` file documents recommended local defaults (including `FAISS_ALLOW_DANGEROUS_DESERIALIZATION=1` for convenience).
+
 ## Run
 
 ```bash
@@ -47,6 +53,25 @@ If you prefer not to allow pickle deserialization, rebuild the index locally and
 python scripts/build_faiss_index.py --force
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
+
+Start server loading a `.env` file (recommended for local dev)
+
+```bash
+python scripts/serve_with_env.py
+```
+
+Quick diagnostics and helper scripts
+- `scripts/check_llm.py` — verifies `ENABLE_LLM` and `OPENROUTER_API_KEY` and attempts to build the OpenRouter client (no external LLM call by default).
+- `scripts/smoke_test.py` — calls the health and `POST /chat` endpoints to validate basic behavior.
+- `scripts/load_test.py` — simple concurrent load harness; example run used during development:
+
+```bash
+python scripts/load_test.py --count 20 --concurrency 5
+```
+
+Persistence and safety notes
+- The FAISS index persistence uses an atomic save flow to reduce corruption risk during concurrent writes. If the index fails to load, check logs for `ValueError` mentioning "dangerous deserialization" — this indicates the index was saved locally and the server needs the `FAISS_ALLOW_DANGEROUS_DESERIALIZATION=1` opt-in or a rebuild with `--force`.
+- The custom embeddings implementation was moved to module scope to improve pickle stability for persisted vector stores.
 
 ## API
 
