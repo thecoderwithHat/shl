@@ -2,5 +2,8 @@ services:
   - type: web
     name: shl-conversational-recommender
     env: python
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
     buildCommand: python -m pip install -e .[dev]
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT

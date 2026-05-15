@@ -110,6 +110,8 @@ Notes on response schema and behavior
 
 Use `uvicorn app.main:app` as the start command. The health endpoint is designed for cold starts, and the service keeps request handling stateless so Render can restart it without losing conversation state.
 
+Render now defaults new Python services to Python 3.14, which can force source builds for `scikit-learn` and `scipy`. This repo pins the service to Python 3.13.5 via `.python-version` and `PYTHON_VERSION` in `render.yaml` so the scientific stack installs from wheels instead of trying to compile.
+
 ## Scope boundaries
 
 This recommender stays inside the catalog facts and the conversation context. It can help compare products, build shortlists, and refuse legal/compliance interpretations, but it does not provide legal advice, infer uncatalogued SHL products, or replace human review when the role requirements are still ambiguous.
