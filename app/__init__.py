@@ -1,13 +1,10 @@
 """SHL conversational recommender package."""
 
 from pathlib import Path
-try:
-	# Load a .env file from the repository root if present (makes os.getenv pick values)
-	from dotenv import load_dotenv
 
-	env_path = Path(__file__).resolve().parents[1] / ".env"
-	if env_path.exists():
-		load_dotenv(env_path)
-except Exception:
-	# Keep import-time failure silent (app can still read env vars from the environment)
-	pass
+from dotenv import load_dotenv
+
+
+env_path = Path(__file__).resolve().parents[1] / ".env"
+# Force .env to win over any already-exported values for local/dev runs.
+load_dotenv(dotenv_path=env_path, override=True)

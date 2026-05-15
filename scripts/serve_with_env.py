@@ -3,18 +3,11 @@ import os
 from pathlib import Path
 import sys
 
-# load .env
+from dotenv import load_dotenv
+
+# load .env and force it to win over already-exported values
 dotenv_path = Path(__file__).resolve().parents[1] / '.env'
-if dotenv_path.exists():
-    with open(dotenv_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line=line.strip()
-            if not line or line.startswith('#'):
-                continue
-            if '=' not in line:
-                continue
-            k,v=line.split('=',1)
-            os.environ.setdefault(k.strip(), v.strip())
+load_dotenv(dotenv_path=dotenv_path, override=True)
 
 # ensure repo root importable
 repo_root = Path(__file__).resolve().parents[1]
