@@ -112,6 +112,9 @@ Use `uvicorn app.main:app` as the start command. The health endpoint is designed
 
 Render now defaults new Python services to Python 3.14, which can force source builds for `scikit-learn` and `scipy`. This repo pins the service to Python 3.13.5 via `.python-version` and `PYTHON_VERSION` in `render.yaml` so the scientific stack installs from wheels instead of trying to compile.
 
+## Docker and Railway
+
+When you deploy the Docker image on Railway, the container must read the injected `PORT` environment variable at runtime. The Dockerfile uses a shell wrapper so `uvicorn` receives the expanded port value instead of the literal string `$PORT`.
 ## Scope boundaries
 
 This recommender stays inside the catalog facts and the conversation context. It can help compare products, build shortlists, and refuse legal/compliance interpretations, but it does not provide legal advice, infer uncatalogued SHL products, or replace human review when the role requirements are still ambiguous.
