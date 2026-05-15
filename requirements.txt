@@ -6,6 +6,7 @@ pytest>=8.0,<9
 httpx>=0.28,<1
 faiss-cpu>=1.13,<2
 langchain-community>=0.4,<1
+langchain-openai>=0.2,<1
 langchain-core>=1.0,<2
 openai>=1.0,<2
 python-dotenv>=1.0,<2

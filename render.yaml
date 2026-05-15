@@ -6,4 +6,4 @@ services:
       - key: PYTHON_VERSION
         value: 3.13.5
     buildCommand: python -m pip install -e .[dev]
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: sh -c "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000}"

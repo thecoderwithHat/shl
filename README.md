@@ -115,6 +115,17 @@ Render now defaults new Python services to Python 3.14, which can force source b
 ## Docker and Railway
 
 When you deploy the Docker image on Railway, the container must read the injected `PORT` environment variable at runtime. The Dockerfile uses a shell wrapper so `uvicorn` receives the expanded port value instead of the literal string `$PORT`.
+
+For Railway Docker deployments, set these runtime variables in the Railway service settings rather than baking them into the image:
+
+- `ENABLE_LLM=1`
+- `OPENROUTER_API_KEY=<your OpenRouter key>`
+- `OPENROUTER_MODEL=<optional model override>`
+- `OPENROUTER_TIMEOUT=<optional timeout in seconds>`
+- `FAISS_INDEX_PATH=/app/faiss_index`
+- `FAISS_ALLOW_DANGEROUS_DESERIALIZATION=1`
+
+The container loads the shipped FAISS index from `/app/faiss_index` by default. If `ENABLE_LLM=1` is set but `langchain-openai` is missing, the service will log `LLM_USED=false reason=client_unavailable` and fall back to deterministic extraction.
 ## Scope boundaries
 
 This recommender stays inside the catalog facts and the conversation context. It can help compare products, build shortlists, and refuse legal/compliance interpretations, but it does not provide legal advice, infer uncatalogued SHL products, or replace human review when the role requirements are still ambiguous.
